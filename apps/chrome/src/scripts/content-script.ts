@@ -5,9 +5,12 @@ import type { TrackInfo } from '../types/metadata';
 class YouTubeMusicContentScript {
   private lastTrackId: string | null = null;
   private lastIsPlaying: boolean | null = null;
+  private lastPlaylist: string | null | undefined = undefined;
   private updateInterval: number | null = null;
   private periodicUpdateInterval: number | null = null;
   private wsManager: WebSocketManager | null = null;
+  private showPlaylistEnabled: boolean = true;
+  private debugModeEnabled: boolean = false;
 
   constructor() {
     this.init();
@@ -19,6 +22,13 @@ class YouTubeMusicContentScript {
 
     // Set up WebSocket status monitoring
     this.setupWebSocketStatusMonitoring();
+
+    // Load playlist setting from storage on init
+    chrome.storage.sync.get(['showPlaylistEnabled', 'debugModeEnabled'], (result) => {
+      this.showPlaylistEnabled = result.showPlaylistEnabled ?? true;
+      this.debugModeEnabled = result.debugModeEnabled ?? false;
+      YouTubeMusicDetector.DEBUG_MODE = this.debugModeEnabled;
+    });
 
     // Listen for messages from popup
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -64,6 +74,9 @@ class YouTubeMusicContentScript {
 
         case 'GET_METADATA': {
           const metadata = YouTubeMusicDetector.extractMetadata();
+          if (!this.showPlaylistEnabled) {
+            metadata.playlist = null;
+          }
           sendResponse(metadata);
           break;
         }
@@ -87,9 +100,30 @@ class YouTubeMusicContentScript {
                 currentDuration: 0,
                 image: null,
                 artistUrl: null,
+                playlist: null,
               },
             });
           }
+          sendResponse({ success: true });
+          break;
+        }
+
+        case 'SHOW_PLAYLIST_TOGGLE': {
+          this.showPlaylistEnabled = message.enabled ?? true;
+          const trackInfo = this.getCurrentTrackInfo();
+          if (this.wsManager && this.wsManager.isConnected()) {
+            this.wsManager.sendEvent({
+              event: 'track',
+              metadata: trackInfo.metadata,
+            });
+          }
+          sendResponse({ success: true });
+          break;
+        }
+
+        case 'DEBUG_MODE_TOGGLE': {
+          this.debugModeEnabled = message.enabled ?? false;
+          YouTubeMusicDetector.DEBUG_MODE = this.debugModeEnabled;
           sendResponse({ success: true });
           break;
         }
@@ -115,6 +149,7 @@ class YouTubeMusicContentScript {
           totalDuration: 0,
           currentDuration: 0,
           image: null,
+          playlist: null,
         },
         isPlaying: false,
         timestamp: Date.now(),
@@ -146,15 +181,29 @@ class YouTubeMusicContentScript {
       currentTrackId && currentTrackId !== this.lastTrackId;
     const hasPlayStateChanged =
       this.lastIsPlaying !== null && this.lastIsPlaying !== isPlaying;
+    const hasPlaylistChanged =
+      trackInfo.metadata.playlist !== this.lastPlaylist;
 
     // Update last known states
     if (currentTrackId) {
       this.lastTrackId = currentTrackId;
     }
     this.lastIsPlaying = isPlaying;
+    this.lastPlaylist = trackInfo.metadata.playlist;
 
     // Only send real-time update to popup when actual changes occur
-    if (hasTrackChanged || hasPlayStateChanged) {
+    if (hasTrackChanged || hasPlayStateChanged || hasPlaylistChanged) {
+      if (hasTrackChanged) {
+        if (this.debugModeEnabled) {
+          console.log('YTMPX - Track Changed:', trackInfo.metadata.title);
+          console.log('YTMPX - Playlist:', trackInfo.metadata.playlist);
+        }
+      } else if (hasPlaylistChanged) {
+        if (this.debugModeEnabled) {
+          console.log('YTMPX - Playlist Updated:', trackInfo.metadata.playlist);
+        }
+      }
+
       chrome.runtime.sendMessage({
         type: 'TRACK_UPDATE',
         trackInfo: trackInfo,
@@ -162,7 +211,7 @@ class YouTubeMusicContentScript {
     }
 
     // Send track changes to WebSocket
-    if (hasTrackChanged || hasPlayStateChanged) {
+    if (hasTrackChanged || hasPlayStateChanged || hasPlaylistChanged) {
       if (this.wsManager) {
         this.wsManager.checkForTrackChanges(
           trackInfo.metadata,
@@ -190,7 +239,7 @@ class YouTubeMusicContentScript {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['aria-valuenow', 'aria-valuemax', 'aria-label'],
+        attributeFilter: ['aria-valuenow', 'aria-valuemax', 'aria-label', 'href'],
       });
     }
   }
@@ -211,6 +260,9 @@ class YouTubeMusicContentScript {
 
   private getCurrentTrackInfo(): TrackInfo {
     const metadata = YouTubeMusicDetector.extractMetadata();
+    if (!this.showPlaylistEnabled) {
+      metadata.playlist = null;
+    }
     const isPlaying = YouTubeMusicDetector.isPlaying();
 
     return {

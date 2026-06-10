@@ -1,6 +1,8 @@
 import type { Metadata } from '../types/metadata';
 
 export class YouTubeMusicDetector {
+  public static DEBUG_MODE = false;
+
   private static readonly SELECTORS = {
     title: 'ytmusic-player-bar yt-formatted-string.title',
     artist: 'ytmusic-player-bar yt-formatted-string.byline',
@@ -11,6 +13,7 @@ export class YouTubeMusicDetector {
     playButton: 'ytmusic-player-bar yt-icon-button#play-pause-button',
     currentTime: 'ytmusic-player-bar .time-info .current-time',
     duration: 'ytmusic-player-bar .time-info .duration',
+    playlist: 'ytmusic-player-queue-header-renderer .subtitle',
   };
 
   private static readonly ALTERNATIVE_SELECTORS = {
@@ -31,6 +34,11 @@ export class YouTubeMusicDetector {
       'ytmusic-player-bar img[src*="googleusercontent"]',
       '.ytmusic-player-bar img',
     ],
+    playlist: [
+      'ytmusic-player-queue .subtitle',
+      '.ytmusic-player-queue-header .subtitle',
+      'ytmusic-panel-header-renderer .subtitle',
+    ],
   };
 
   private static findElement(selectors: string[]): Element | null {
@@ -41,6 +49,11 @@ export class YouTubeMusicDetector {
       }
     }
     return null;
+  }
+
+  private static isElementVisible(el: Element): boolean {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
   }
 
   static extractMetadata(): Metadata {
@@ -55,6 +68,116 @@ export class YouTubeMusicDetector {
         ...this.ALTERNATIVE_SELECTORS.artist,
       ]);
 
+      const title = titleElement?.textContent?.trim() || '';
+
+      let playlist: string | null = null;
+
+      // Ambil ID playlist dari link judul di player bar (jauh lebih akurat dari window.location.href yg kadang delay saat ganti lagu)
+      const playingTitleLink = document.querySelector('ytmusic-player-bar .title') as HTMLAnchorElement | null;
+      const playingHref = playingTitleLink?.getAttribute('href') || playingTitleLink?.href || '';
+      const listMatch = playingHref.match(/[?&]list=([^&]+)/) || window.location.href.match(/[?&]list=([^&]+)/);
+      const playingListId = listMatch ? listMatch[1] : null;
+
+      const IGNORE_PLAYLIST_REGEX = /up next|berikutnya|antrean|queue|次の曲|putar acak|shuffle/i;
+
+      // 1. [PRIORITY] Cari nama playlist dari URL listID yang sama di semua link yang ada di halaman
+      if (!playlist && playingListId) {
+        const links = document.querySelectorAll(`a[href*="list=${playingListId}"]`);
+        for (const link of Array.from(links)) {
+          // Abaikan link video, cari link yang mengarah langsung ke playlist page (tanpa v=)
+          const href = link.getAttribute('href') || '';
+          if (YouTubeMusicDetector.DEBUG_MODE) {
+            console.log('[YTMPX Link Search]', { text: link.textContent?.trim(), href: href });
+          }
+          if (href.includes('?v=') || href.includes('&v=')) continue;
+
+          // Abaikan elemen halaman lama yang sedang disembunyikan oleh YouTube (SPA Caching)
+          if (!this.isElementVisible(link)) continue;
+
+          const titleAttr = link.getAttribute('title');
+          if (titleAttr && titleAttr.trim().length > 0 && titleAttr !== title && !/play|memutar/i.test(titleAttr) && !IGNORE_PLAYLIST_REGEX.test(titleAttr)) {
+            playlist = titleAttr.trim();
+            break;
+          }
+
+          const text = link.textContent?.trim();
+          if (text && text.length > 0 && text !== title && !/play|memutar/i.test(text) && !IGNORE_PLAYLIST_REGEX.test(text)) {
+            playlist = text;
+            break;
+          }
+        }
+      }
+
+      // 2. Fallback: Ekstraksi dari Panel Antrean / Queue Header
+      if (!playlist) {
+        const headerEls = document.querySelectorAll(
+          'ytmusic-queue-header-renderer .subtitle, ' +
+          'yt-formatted-string.subtitle.ytmusic-queue-header-renderer'
+        );
+
+        for (const el of Array.from(headerEls)) {
+          if (!this.isElementVisible(el)) continue;
+
+          let possibleName = el.getAttribute('title')?.trim();
+          if (!possibleName) possibleName = el.textContent?.trim();
+
+          if (possibleName && !IGNORE_PLAYLIST_REGEX.test(possibleName) && possibleName !== title) {
+            possibleName = possibleName.replace(/^(Memutar dari|Playing from|Diputar dari|プレイリストから再生|Dari|From|Playlist)\s*[:•]?\s*/i, '').trim();
+            if (possibleName) {
+              playlist = possibleName;
+              break;
+            }
+          }
+        }
+      }
+
+      // 3. Fallback: Header detail playlist di halaman jika sedang dibuka (jika kita ada di halaman playlistnya)
+      if (!playlist && playingListId) {
+        const headerTitles = document.querySelectorAll('ytmusic-detail-header-renderer h2, ytmusic-header-renderer h2.title');
+        for (const headerTitle of Array.from(headerTitles)) {
+          if (!this.isElementVisible(headerTitle)) continue;
+
+          const headerText = headerTitle.textContent?.trim();
+          const pageUrl = window.location.href;
+          if (headerText && pageUrl.includes('list=') && !pageUrl.includes('watch?v=')) {
+            playlist = headerText;
+            break;
+          }
+        }
+      }
+
+      // 4. Fallback MediaSession API (biasanya ada nama album jika memutar dari album)
+      if (!playlist && 'mediaSession' in navigator && navigator.mediaSession.metadata) {
+        const album = navigator.mediaSession.metadata.album;
+        if (album && album.trim().length > 0 && album.trim() !== title) {
+          playlist = album.trim();
+        }
+      }
+
+      // 5. Fallback Byline Text
+      if (!playlist && artistElement) {
+        const bylineText = artistElement.textContent || '';
+        const parts = bylineText.split('•').map(p => p.trim());
+        if (parts.length >= 3) {
+          const possibleAlbum = parts[1];
+          // Abaikan jika bagian tersebut merupakan views (termasuk 回視聴 dalam bahasa Jepang)
+          if (!/views|ditonton|tayang|x|回視聴/i.test(possibleAlbum) && !/^\d+$/.test(possibleAlbum)) {
+            playlist = possibleAlbum;
+          }
+        }
+      }
+
+      // 6. Fallback Generic: Deteksi nama bawaan berdasar ID (Radio atau Playlist)
+      if (!playlist && playingListId) {
+        if (playingListId.startsWith('RD') || playingListId.startsWith('LM')) {
+          playlist = 'YouTube Music Radio';
+        } else if (playingListId.startsWith('PL') || playingListId.startsWith('OL')) {
+          playlist = 'YouTube Music Playlist';
+        } else {
+          playlist = 'YouTube Music Mix';
+        }
+      }
+
       const progressBarElement = document.querySelector(
         this.SELECTORS.progressBar
       );
@@ -64,15 +187,13 @@ export class YouTubeMusicDetector {
         ...this.ALTERNATIVE_SELECTORS.thumbnail,
       ]);
 
-      const title = titleElement?.textContent?.trim() || '';
-
       // Extract artist names from <a> tags in byline (excluding album links)
       let author = '';
       if (artistElement) {
-        const allLinks = artistElement.querySelectorAll('a');
+        const allLinks = Array.from(artistElement.querySelectorAll('a'));
         const artists: string[] = [];
 
-        allLinks.forEach((link) => {
+        for (const link of allLinks) {
           const href = link.getAttribute('href') || '';
           const text = link.textContent?.trim() || '';
 
@@ -80,21 +201,35 @@ export class YouTubeMusicDetector {
           // Channel links typically contain "channel/" in the URL
           if (href.includes('channel/') && text) {
             artists.push(text);
+          } else if (!playlist && (href.includes('browse/') || href.includes('playlist')) && text) {
+            // Fallback: Ambil nama album/playlist dari byline player bar bawah
+            playlist = text;
           }
-        });
+        }
 
         // Join multiple artists with proper formatting
-        if (artists.length === 0) {
-          author = '';
-        } else if (artists.length === 1) {
-          author = artists[0];
-        } else if (artists.length === 2) {
-          author = artists.join(' & ');
+        if (artists.length > 0) {
+          if (artists.length === 1) {
+            author = artists[0];
+          } else if (artists.length === 2) {
+            author = artists.join(' & ');
+          } else {
+            // For 3+ artists: "Artist1, Artist2 & Artist3"
+            const allButLast = artists.slice(0, -1).join(', ');
+            const last = artists[artists.length - 1];
+            author = `${allButLast} & ${last}`;
+          }
         } else {
-          // For 3+ artists: "Artist1, Artist2 & Artist3"
-          const allButLast = artists.slice(0, -1).join(', ');
-          const last = artists[artists.length - 1];
-          author = `${allButLast} & ${last}`;
+          // Fallback if no artist links are found, parse from byline text
+          const bylineText = artistElement.textContent || '';
+          const parts = bylineText.split('•').map(p => p.trim());
+          if (parts.length > 0) {
+            const possibleArtist = parts[0];
+            // Make sure it's not just a number (like a year) or view count
+            if (possibleArtist && !/^\d+$/.test(possibleArtist) && !/views|ditonton|subscribers|tayangan|penayangan|bersponsor/i.test(possibleArtist)) {
+              author = possibleArtist;
+            }
+          }
         }
       }
 
@@ -133,6 +268,10 @@ export class YouTubeMusicDetector {
       const durationInfo = this.extractDurationInfo(progressBarElement);
       const image = thumbnailElement?.getAttribute('src') || null;
 
+      if (YouTubeMusicDetector.DEBUG_MODE) {
+        console.log('[YTMPX Extracted] Title:', title, '| Artist:', author, '| Playlist:', playlist);
+      }
+
       const metadata: Metadata = {
         title,
         author,
@@ -141,10 +280,14 @@ export class YouTubeMusicDetector {
         currentDuration: durationInfo.currentDuration,
         image: image ? this.upscaledImage(image) : null,
         artistUrl,
+        playlist,
       };
 
       return metadata;
-    } catch {
+    } catch (e) {
+      if (YouTubeMusicDetector.DEBUG_MODE) {
+        console.error('[YTMPX] Error during metadata extraction:', e);
+      }
       return {
         title: '',
         author: '',
@@ -153,6 +296,7 @@ export class YouTubeMusicDetector {
         currentDuration: 0,
         image: null,
         artistUrl: null,
+        playlist: null,
       };
     }
   }

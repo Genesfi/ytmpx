@@ -32,6 +32,7 @@ export class WebSocketManager {
   }
   private lastTrackId: string | null = null;
   private lastIsPlaying: boolean | null = null;
+  private lastPlaylist: string | null | undefined = undefined;
 
   constructor() {
     // Delay initial connection attempt to avoid immediate console errors
@@ -196,14 +197,16 @@ export class WebSocketManager {
 
   public checkForTrackChanges(metadata: Metadata, isPlaying: boolean) {
     const currentTrackId = this.getTrackId(metadata);
+    const currentPlaylist = metadata.playlist;
 
-    // Check for track change
-    if (currentTrackId && currentTrackId !== this.lastTrackId) {
+    // Check for track change OR playlist change (delayed extraction)
+    if ((currentTrackId && currentTrackId !== this.lastTrackId) || currentPlaylist !== this.lastPlaylist) {
       this.sendEvent({
         event: 'track',
         metadata,
       });
       this.lastTrackId = currentTrackId;
+      this.lastPlaylist = currentPlaylist;
     }
 
     // Check for play/pause state change

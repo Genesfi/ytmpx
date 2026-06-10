@@ -61,6 +61,11 @@ export const TrackCard: React.FC<TrackCardProps> = ({
           <p className="text-muted-foreground text-sm">
             {metadata.author || 'Start playing a song on YouTube Music'}
           </p>
+          {metadata.playlist && (
+            <p className="text-xs text-primary mt-2 font-medium bg-primary/10 inline-block px-3 py-1 rounded-full border border-primary/20">
+              Playlist: {metadata.playlist}
+            </p>
+          )}
         </div>
 
         {/* Only show progress section if there's actual track data */}
@@ -86,11 +91,10 @@ export const TrackCard: React.FC<TrackCardProps> = ({
                 <div className="flex items-center gap-2">
                   <Badge
                     variant={isPlaying ? 'default' : 'secondary'}
-                    className={`${
-                      isPlaying
-                        ? 'bg-green-500/20 text-green-600 hover:bg-green-500/30'
-                        : 'bg-orange-500/20 text-orange-600 hover:bg-orange-500/30'
-                    } border-0`}
+                    className={`${isPlaying
+                      ? 'bg-green-500/20 text-green-600 hover:bg-green-500/30'
+                      : 'bg-orange-500/20 text-orange-600 hover:bg-orange-500/30'
+                      } border-0`}
                   >
                     <div className="flex items-center gap-1.5">
                       {isPlaying ? (
